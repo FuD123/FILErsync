@@ -21,12 +21,11 @@
 
 ### 安装步骤
 ```powershell
-# 1. 安装Python依赖
-pip install -r requirements.txt
-
-# 2. 克隆仓库
+# 1. 克隆仓库
 git clone https://example.com/smb-transfer-system.git
-cd smb-transfer-system
+
+# 2. 安装依赖
+pip install -r requirements.txt
 
 # 3. 设置计划任务（管理员权限运行）
 $Trigger = New-ScheduledTaskTrigger -Daily -At 8am
