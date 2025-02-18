@@ -25,8 +25,11 @@ logging_handlers = {}
 class ConfigHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if event.src_path.endswith('config.ini'):
-            load_config()
-            logging.info(f"Config reloaded (v{config['General'].getfloat('version', 1.0)})")
+            try:
+                load_config()
+                logging.info(f"Config reloaded (v{config['General'].getfloat('version', 1.0)})")
+            except Exception as e:
+                logging.getLogger('error').error(f"Config reload failed: {str(e)}")
 
 def setup_logger():
     log_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
@@ -48,17 +51,25 @@ def setup_file_logger(name, log_file, level, formatter):
     return logger
 
 def load_config():
-    config.read('config.ini')
-    if not os.path.exists(config['General']['local_base']):
-        os.makedirs(config['General']['local_base'])
+    try:
+        config.read('config.ini')
+        local_base = config['General']['local_base']
+        if not os.path.exists(local_base):
+            os.makedirs(local_base)
+    except configparser.Error as e:
+        logging.getLogger('error').error(f"Config file read error: {str(e)}")
+    except KeyError as e:
+        logging.getLogger('error').error(f"Config key missing: {str(e)}")
 
 def get_hosts():
     global hosts
     try:
         with open('hosts.csv', 'r') as f:
             hosts = list(csv.DictReader(f))
-    except Exception as e:
-        logging.getLogger('error').error(f"读取主机列表失败: {str(e)}")
+    except FileNotFoundError as e:
+        logging.getLogger('error').error(f"Hosts file not found: {str(e)}")
+    except csv.Error as e:
+        logging.getLogger('error').error(f"CSV file read error: {str(e)}")
 
 def connect_smb(host):
     try:
@@ -86,10 +97,9 @@ def transfer_file(host, file_entry):
     
     while retry <= max_retries:
         try:
-            with open_file(file_path, mode='rb') as remote_file:
-                with open(local_path, 'wb') as local_file:
-                    while chunk := remote_file.read(config.getint('Advanced', 'chunk_size')):
-                        local_file.write(chunk)
+            with open_file(file_path, mode='rb') as remote_file, open(local_path, 'wb') as local_file:
+                while chunk := remote_file.read(config.getint('Advanced', 'chunk_size')):
+                    local_file.write(chunk)
             
             # 哈希校验
             if verify_hash(local_path):
@@ -119,46 +129,58 @@ def verify_hash(local_path):
                 hasher.update(chunk)
         logging.getLogger('hash').info(f"{local_path}|{hasher.hexdigest()}")
         return True
+    except FileNotFoundError as e:
+        logging.getLogger('error').error(f"File not found for hash verification: {str(e)}")
+        return False
+    except hashlib.NoSuchAlgorithmException as e:
+        logging.getLogger('error').error(f"Hash algorithm not supported: {str(e)}")
+        return False
     except Exception as e:
         logging.getLogger('error').error(f"{local_path} 哈希校验错误: {str(e)}")
         return False
 
 def cleanup_old_logs():
-    keep_days = config.getint('General', 'log_keep_days')
-    cutoff = datetime.now() - timedelta(days=keep_days)
-    
-    for root, dirs, files in os.walk('logs'):
-        for file in files:
-            file_path = os.path.join(root, file)
-            if datetime.fromtimestamp(os.path.getmtime(file_path)) < cutoff:
-                os.remove(file_path)
-                logging.info(f"已清理旧日志: {file_path}")
+    try:
+        keep_days = config.getint('General', 'log_keep_days')
+        cutoff = datetime.now() - timedelta(days=keep_days)
+        
+        for root, dirs, files in os.walk('logs'):
+            for file in files:
+                file_path = os.path.join(root, file)
+                if datetime.fromtimestamp(os.path.getmtime(file_path)) < cutoff:
+                    os.remove(file_path)
+                    logging.info(f"已清理旧日志: {file_path}")
+    except Exception as e:
+        logging.getLogger('error').error(f"清理旧日志失败: {str(e)}")
 
 def compress_logs():
-    today = datetime.now().strftime('%Y-%m-%d')
-    with zipfile.ZipFile(f'logs/archive_{today}.zip', 'w') as zipf:
-        for root, _, files in os.walk('logs'):
-            for file in files:
-                if file.endswith('.log') and not file.startswith('archive'):
-                    zipf.write(os.path.join(root, file))
-                    os.remove(os.path.join(root, file))
+    try:
+        today = datetime.now().strftime('%Y-%m-%d')
+        with zipfile.ZipFile(f'logs/archive_{today}.zip', 'w') as zipf:
+            for root, _, files in os.walk('logs'):
+                for file in files:
+                    if file.endswith('.log') and not file.startswith('archive'):
+                        zipf.write(os.path.join(root, file))
+                        os.remove(os.path.join(root, file))
+    except Exception as e:
+        logging.getLogger('error').error(f"压缩日志失败: {str(e)}")
 
 def send_email():
-    msg = MIMEText(
-        f"""传输统计报告 ({datetime.now().strftime('%Y-%m-%d')})
-        
-        成功文件: {transfer_stats['success']}
-        失败文件: {transfer_stats['failed']}
-        重试次数: {transfer_stats['retries']}
-        
-        完整日志请查看附件日志文件""")
-    
-    msg['Subject'] = f'文件传输报告 {datetime.now().strftime("%Y-%m-%d")}'
-    msg['From'] = config['Email']['sender']
-    msg['To'] = config['Email']['receivers']
-    msg['Date'] = formatdate()
-    
     try:
+        msg = MIMEText(
+            f"""传输统计报告 ({datetime.now().strftime('%Y-%m-%d')})
+            
+            成功文件: {transfer_stats['success']}
+            失败文件: {transfer_stats['failed']}
+            重试次数: {transfer_stats['retries']}
+            
+            完整日志请查看附件日志文件""")
+        
+        msg['Subject'] = f'文件传输报告 {datetime.now().strftime("%Y-%m-%d")}'
+        msg['From'] = config['Email']['sender']
+        msg['To'] = config['Email']['receivers']
+        msg['Date'] = formatdate()
+        
         with smtplib.SMTP(config['Email']['smtp_server'], config.getint('Email', 'smtp_port')) as server:
             server.starttls()
             server.login(config['Email']['sender'], config['Email']['password'])
@@ -166,16 +188,21 @@ def send_email():
                            config['Email']['receivers'].split(','), 
                            msg.as_string())
         logging.info("邮件发送成功")
+    except smtplib.SMTPException as e:
+        logging.getLogger('error').error(f"邮件发送失败: {str(e)}")
     except Exception as e:
         logging.getLogger('error').error(f"邮件发送失败: {str(e)}")
 
 def monitor_resources():
-    mem = psutil.virtual_memory()
-    if mem.percent > 80:
-        ThreadPoolExecutor._max_workers = max(5, ThreadPoolExecutor._max_workers - 2)
-    elif mem.percent < 40:
-        ThreadPoolExecutor._max_workers = min(config.getint('General', 'threads'), 
-                                             ThreadPoolExecutor._max_workers + 2)
+    try:
+        mem = psutil.virtual_memory()
+        if mem.percent > 80:
+            ThreadPoolExecutor._max_workers = max(5, ThreadPoolExecutor._max_workers - 2)
+        elif mem.percent < 40:
+            ThreadPoolExecutor._max_workers = min(config.getint('General', 'threads'), 
+                                                 ThreadPoolExecutor._max_workers + 2)
+    except Exception as e:
+        logging.getLogger('error').error(f"资源监控失败: {str(e)}")
 
 def main_job():
     global transfer_stats
